@@ -3,12 +3,14 @@ const WEBHOOK = '/endpoint'
 const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
 const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
 
-const NOTIFY_INTERVAL = 3600 * 1000;
 const fraudDb = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db';
-const notificationUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/notification.txt'
-const startMsgUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md';
 
-const enable_notification = true
+const guestStartMsg = '你好，直接发送消息即可，我会尽快回复。'
+const adminStartMsg = `使用方法：
+
+- 当其他用户给bot发消息，会被转发到bot创建者
+- 用户回复普通文字给转发的消息时，会回复到原消息发送者
+- 用户回复 /block, /unblock, /checkblock 等命令会执行相关指令，不会回复到原消息发送者`
 /**
  * Return url to telegram api, optionally with parameters added
  */
@@ -97,10 +99,9 @@ async function onUpdate (update) {
  */
 async function onMessage (message) {
   if(message.text === '/start'){
-    let startMsg = await fetch(startMsgUrl).then(r => r.text())
     return sendMessage({
       chat_id:message.chat.id,
-      text:startMsg,
+      text:message.chat.id.toString() === ADMIN_UID ? adminStartMsg : guestStartMsg,
     })
   }
   if(message.chat.id.toString() === ADMIN_UID){
@@ -154,24 +155,13 @@ async function handleGuestMessage(message){
 }
 
 async function handleNotify(message){
-  // 先判断是否是诈骗人员，如果是，则直接提醒
-  // 如果不是，则根据时间间隔提醒：用户id，交易注意点等
+  // 如果是诈骗人员，则直接提醒
   let chatId = message.chat.id;
   if(await isFraud(chatId)){
     return sendMessage({
       chat_id: ADMIN_UID,
       text:`检测到骗子，UID${chatId}`
     })
-  }
-  if(enable_notification){
-    let lastMsgTime = await nfd.get('lastmsg-' + chatId, { type: "json" })
-    if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL){
-      await nfd.put('lastmsg-' + chatId, Date.now())
-      return sendMessage({
-        chat_id: ADMIN_UID,
-        text:await fetch(notificationUrl).then(r => r.text())
-      })
-    }
   }
 }
 

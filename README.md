@@ -1,15 +1,3 @@
-## 更新
-
-欢迎使用我们NFD2.0项目🎉，1分钟内快速搭建教程：
-
-> 用户先去[@BotFather](https://t.me/NodeForwardBot/BotFather)，输入 `/newbot` ，按照指引输入你要创建的机器人的昵称和名字，点击复制机器人吐出的token
-> 
-> 然后到[@NodeForwardBot](https://t.me/NodeForwardBot)粘贴，完活。
-> 
-> 详细信息可以参考：[https://www.nodeseek.com/post-286885-1](https://www.nodeseek.com/post-286885-1)
-
-NFD2.0拥有无限配额（自建有每日1k消息上限），且托管在[cloudflare snippets](https://developers.cloudflare.com/rules/snippets/)，理论上不会掉线。如果需要自建，参考下面的自建教程。
-
 # NFD
 No Fraud / Node Forward Bot
 
