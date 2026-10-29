@@ -1,0 +1,10 @@
+name = "nfd"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+workers_dev = true
+preview_urls = false
+
+# ENV_BOT_TOKEN / ENV_BOT_SECRET / ENV_ADMIN_UID 用 `wrangler secret put` 设置
+kv_namespaces = [
+  { binding = "nfd", id = "fbfb452b7ff944a3a000d554216092b8" }
+]
