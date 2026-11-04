@@ -49,6 +49,146 @@ function forwardMessage(msg){
   return requestTelegram('forwardMessage', makeReqBody(msg))
 }
 
+function answerCallbackQuery(msg){
+  return requestTelegram('answerCallbackQuery', makeReqBody(msg))
+}
+
+function editMessageText(msg){
+  return requestTelegram('editMessageText', makeReqBody(msg))
+}
+
+// ===== 验证码 =====
+const CAPTCHA_TTL = 300          // 验证码有效期（秒），KV 最小 60
+const CAPTCHA_MAX_FAILS = 3      // 连续答错次数上限
+const CAPTCHA_LOCK_TTL = 3600    // 答错过多后的锁定时长（秒）
+const CAPTCHA_MAX_PENDING = 5    // 验证通过前最多暂存的消息数，通过后一并转发
+
+function randInt(min, max){
+  const buf = new Uint32Array(1)
+  crypto.getRandomValues(buf)
+  return min + (buf[0] % (max - min + 1))
+}
+
+function shuffle(arr){
+  for(let i = arr.length - 1; i > 0; i--){
+    const j = randInt(0, i)
+    ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  }
+  return arr
+}
+
+async function isVerified(chatId){
+  return !!(await nfd.get('verified-' + chatId, { type: 'json' }))
+}
+
+/**
+ * 给访客发一道算术题，选项以 inline keyboard 呈现
+ */
+async function sendCaptcha(chatId, prefix = ''){
+  const a = randInt(1, 20)
+  const b = randInt(1, 20)
+  const answer = a + b
+  const options = new Set([answer])
+  while(options.size < 4){
+    const v = answer + randInt(-6, 6)
+    if(v > 0) options.add(v)
+  }
+  const old = await nfd.get('captcha-' + chatId, { type: 'json' })
+  await nfd.put('captcha-' + chatId, JSON.stringify({
+    answer,
+    fails: old?.fails || 0,
+    pending: old?.pending || [],
+  }), { expirationTtl: CAPTCHA_TTL })
+
+  return sendMessage({
+    chat_id: chatId,
+    text: `${prefix}为防止广告骚扰，首次发消息前请完成验证（${CAPTCHA_TTL / 60} 分钟内有效）：\n\n${a} + ${b} = ?`,
+    reply_markup: {
+      inline_keyboard: [shuffle([...options]).map(v => ({
+        text: String(v),
+        callback_data: `captcha:${v}`,
+      }))],
+    },
+  })
+}
+
+/**
+ * 未验证访客的消息：暂存并提示验证
+ */
+async function handleUnverified(message){
+  const chatId = message.chat.id
+  if(await nfd.get('captcha-lock-' + chatId)){
+    return sendMessage({ chat_id: chatId, text: '验证失败次数过多，请稍后再试。' })
+  }
+  const state = await nfd.get('captcha-' + chatId, { type: 'json' })
+  if(!state){
+    await nfd.put('captcha-' + chatId, JSON.stringify({ answer: null, fails: 0, pending: [message.message_id] }),
+                  { expirationTtl: CAPTCHA_TTL })
+    return sendCaptcha(chatId)
+  }
+  if(state.pending.length < CAPTCHA_MAX_PENDING){
+    state.pending.push(message.message_id)
+    await nfd.put('captcha-' + chatId, JSON.stringify(state), { expirationTtl: CAPTCHA_TTL })
+  }
+  return sendMessage({ chat_id: chatId, text: '请先点击上方验证码中的正确答案完成验证。' })
+}
+
+async function onCallbackQuery(query){
+  const data = query.data || ''
+  if(!data.startsWith('captcha:')){
+    return answerCallbackQuery({ callback_query_id: query.id })
+  }
+  const chatId = query.message?.chat?.id
+  const messageId = query.message?.message_id
+  // 只接受私聊中本人点击
+  if(!chatId || query.from.id !== chatId){
+    return answerCallbackQuery({ callback_query_id: query.id, text: '无效操作' })
+  }
+  if(await isVerified(chatId)){
+    await answerCallbackQuery({ callback_query_id: query.id, text: '你已通过验证' })
+    return editMessageText({ chat_id: chatId, message_id: messageId, text: '✅ 已通过验证' })
+  }
+  if(await nfd.get('captcha-lock-' + chatId)){
+    return answerCallbackQuery({ callback_query_id: query.id, text: '验证失败次数过多，请稍后再试', show_alert: true })
+  }
+  const state = await nfd.get('captcha-' + chatId, { type: 'json' })
+  if(!state || state.answer == null){
+    await answerCallbackQuery({ callback_query_id: query.id, text: '验证码已过期，已重新生成' })
+    await editMessageText({ chat_id: chatId, message_id: messageId, text: '验证码已过期' })
+    return sendCaptcha(chatId)
+  }
+
+  const choice = parseInt(data.slice('captcha:'.length), 10)
+  if(choice === state.answer){
+    await nfd.put('verified-' + chatId, true)
+    await nfd.delete('captcha-' + chatId)
+    await answerCallbackQuery({ callback_query_id: query.id, text: '验证通过' })
+    await editMessageText({ chat_id: chatId, message_id: messageId, text: '✅ 验证通过，现在可以直接发送消息了。' })
+    // 转发验证前暂存的消息
+    for(const mid of state.pending){
+      await forwardGuestMessage(chatId, mid)
+    }
+    return
+  }
+
+  const fails = (state.fails || 0) + 1
+  if(fails >= CAPTCHA_MAX_FAILS){
+    await nfd.delete('captcha-' + chatId)
+    await nfd.put('captcha-lock-' + chatId, true, { expirationTtl: CAPTCHA_LOCK_TTL })
+    await answerCallbackQuery({ callback_query_id: query.id, text: '答错次数过多', show_alert: true })
+    return editMessageText({
+      chat_id: chatId,
+      message_id: messageId,
+      text: `❌ 答错次数过多，请 ${CAPTCHA_LOCK_TTL / 60} 分钟后再试。`,
+    })
+  }
+  state.fails = fails
+  await nfd.put('captcha-' + chatId, JSON.stringify(state), { expirationTtl: CAPTCHA_TTL })
+  await answerCallbackQuery({ callback_query_id: query.id, text: '答案错误，请重试' })
+  await editMessageText({ chat_id: chatId, message_id: messageId, text: '❌ 答案错误' })
+  return sendCaptcha(chatId, `答案错误（剩余 ${CAPTCHA_MAX_FAILS - fails} 次机会）。\n`)
+}
+
 /**
  * Wait for requests to the worker
  */
@@ -90,6 +230,8 @@ async function handleWebhook (event) {
 async function onUpdate (update) {
   if ('message' in update) {
     await onMessage(update.message)
+  } else if ('callback_query' in update) {
+    await onCallbackQuery(update.callback_query)
   }
 }
 
@@ -99,10 +241,16 @@ async function onUpdate (update) {
  */
 async function onMessage (message) {
   if(message.text === '/start'){
-    return sendMessage({
+    const isAdmin = message.chat.id.toString() === ADMIN_UID
+    await sendMessage({
       chat_id:message.chat.id,
-      text:message.chat.id.toString() === ADMIN_UID ? adminStartMsg : guestStartMsg,
+      text:isAdmin ? adminStartMsg : guestStartMsg,
     })
+    if(!isAdmin && !(await isVerified(message.chat.id))
+       && !(await nfd.get('captcha-lock-' + message.chat.id))){
+      return sendCaptcha(message.chat.id)
+    }
+    return
   }
   if(message.chat.id.toString() === ADMIN_UID){
     if(!message?.reply_to_message?.chat){
@@ -142,16 +290,25 @@ async function handleGuestMessage(message){
     })
   }
 
+  if(!(await isVerified(chatId))){
+    return handleUnverified(message)
+  }
+
+  await forwardGuestMessage(chatId, message.message_id)
+  return handleNotify(message)
+}
+
+async function forwardGuestMessage(chatId, messageId){
   let forwardReq = await forwardMessage({
     chat_id:ADMIN_UID,
-    from_chat_id:message.chat.id,
-    message_id:message.message_id
+    from_chat_id:chatId,
+    message_id:messageId
   })
   console.log(JSON.stringify(forwardReq))
   if(forwardReq.ok){
     await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
   }
-  return handleNotify(message)
+  return forwardReq
 }
 
 async function handleNotify(message){
