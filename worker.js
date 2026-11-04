@@ -57,11 +57,18 @@ function editMessageText(msg){
   return requestTelegram('editMessageText', makeReqBody(msg))
 }
 
+function deleteMessage(msg){
+  return requestTelegram('deleteMessage', makeReqBody(msg))
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
 // ===== 验证码 =====
 const CAPTCHA_TTL = 300          // 验证码有效期（秒），KV 最小 60
 const CAPTCHA_MAX_FAILS = 3      // 连续答错次数上限
 const CAPTCHA_LOCK_TTL = 3600    // 答错过多后的锁定时长（秒）
 const CAPTCHA_MAX_PENDING = 5    // 验证通过前最多暂存的消息数，通过后一并转发
+const CAPTCHA_PASS_MSG_TTL = 5   // “验证通过”提示保留秒数，之后自动删除（Worker 后台最多约 30 秒）
 
 function randInt(min, max){
   const buf = new Uint32Array(1)
@@ -168,7 +175,9 @@ async function onCallbackQuery(query){
     for(const mid of state.pending){
       await forwardGuestMessage(chatId, mid)
     }
-    return
+    // 提示停留几秒后自动删除
+    await sleep(CAPTCHA_PASS_MSG_TTL * 1000)
+    return deleteMessage({ chat_id: chatId, message_id: messageId })
   }
 
   const fails = (state.fails || 0) + 1
