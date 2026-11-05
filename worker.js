@@ -63,10 +63,11 @@ function deleteMessage(msg){
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-// ===== 验证码 =====
+// ===== 验证码：按顺序点击数字 =====
 const CAPTCHA_TTL = 300          // 验证码有效期（秒），KV 最小 60
+const CAPTCHA_LEN = 4            // 需要依次点击的数字个数（从 1-9 中不重复抽取）
 const CAPTCHA_MAX_FAILS = 3      // 连续答错次数上限
-const CAPTCHA_LOCK_TTL = 3600    // 答错过多后的锁定时长（秒）
+const CAPTCHA_LOCK_TTL = 6 * 3600 // 答错过多后的锁定时长（秒）
 const CAPTCHA_MAX_PENDING = 5    // 验证通过前最多暂存的消息数，通过后一并转发
 const CAPTCHA_PASS_MSG_TTL = 5   // “验证通过”提示保留秒数，之后自动删除（Worker 后台最多约 30 秒）
 
@@ -88,34 +89,43 @@ async function isVerified(chatId){
   return !!(await nfd.get('verified-' + chatId, { type: 'json' }))
 }
 
+function captchaText(state, prefix = ''){
+  const progress = '●'.repeat(state.pos) + '○'.repeat(state.seq.length - state.pos)
+  return `${prefix}为防止广告骚扰，首次发消息前请完成验证（${CAPTCHA_TTL / 60} 分钟内有效）。\n\n`
+    + `请按顺序依次点击：${state.seq.join('  ')}\n\n进度：${progress}`
+}
+
+function captchaKeyboard(state){
+  const rows = []
+  for(let i = 0; i < state.pad.length; i += 3){
+    rows.push(state.pad.slice(i, i + 3).map(v => ({
+      text: String(v),
+      callback_data: `captcha:${state.nonce}:${v}`,
+    })))
+  }
+  return { inline_keyboard: rows }
+}
+
 /**
- * 给访客发一道算术题，选项以 inline keyboard 呈现
+ * 给访客发验证码：从 1-9 中抽 CAPTCHA_LEN 个不重复数字，要求按顺序在打乱的九宫格中点击
  */
 async function sendCaptcha(chatId, prefix = ''){
-  const a = randInt(1, 20)
-  const b = randInt(1, 20)
-  const answer = a + b
-  const options = new Set([answer])
-  while(options.size < 4){
-    const v = answer + randInt(-6, 6)
-    if(v > 0) options.add(v)
-  }
+  const digits = shuffle([1, 2, 3, 4, 5, 6, 7, 8, 9])
   const old = await nfd.get('captcha-' + chatId, { type: 'json' })
-  await nfd.put('captcha-' + chatId, JSON.stringify({
-    answer,
+  const state = {
+    seq: digits.slice(0, CAPTCHA_LEN),
+    pad: shuffle([1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    pos: 0,
+    nonce: randInt(100000, 999999).toString(36),
     fails: old?.fails || 0,
     pending: old?.pending || [],
-  }), { expirationTtl: CAPTCHA_TTL })
+  }
+  await nfd.put('captcha-' + chatId, JSON.stringify(state), { expirationTtl: CAPTCHA_TTL })
 
   return sendMessage({
     chat_id: chatId,
-    text: `${prefix}为防止广告骚扰，首次发消息前请完成验证（${CAPTCHA_TTL / 60} 分钟内有效）：\n\n${a} + ${b} = ?`,
-    reply_markup: {
-      inline_keyboard: [shuffle([...options]).map(v => ({
-        text: String(v),
-        callback_data: `captcha:${v}`,
-      }))],
-    },
+    text: captchaText(state, prefix),
+    reply_markup: captchaKeyboard(state),
   })
 }
 
@@ -129,7 +139,7 @@ async function handleUnverified(message){
   }
   const state = await nfd.get('captcha-' + chatId, { type: 'json' })
   if(!state){
-    await nfd.put('captcha-' + chatId, JSON.stringify({ answer: null, fails: 0, pending: [message.message_id] }),
+    await nfd.put('captcha-' + chatId, JSON.stringify({ fails: 0, pending: [message.message_id] }),
                   { expirationTtl: CAPTCHA_TTL })
     return sendCaptcha(chatId)
   }
@@ -137,7 +147,7 @@ async function handleUnverified(message){
     state.pending.push(message.message_id)
     await nfd.put('captcha-' + chatId, JSON.stringify(state), { expirationTtl: CAPTCHA_TTL })
   }
-  return sendMessage({ chat_id: chatId, text: '请先点击上方验证码中的正确答案完成验证。' })
+  return sendMessage({ chat_id: chatId, text: '请先按顺序点击上方验证码中的数字完成验证。' })
 }
 
 async function onCallbackQuery(query){
@@ -159,14 +169,33 @@ async function onCallbackQuery(query){
     return answerCallbackQuery({ callback_query_id: query.id, text: '验证失败次数过多，请稍后再试', show_alert: true })
   }
   const state = await nfd.get('captcha-' + chatId, { type: 'json' })
-  if(!state || state.answer == null){
+  if(!state || !state.seq){
     await answerCallbackQuery({ callback_query_id: query.id, text: '验证码已过期，已重新生成' })
     await editMessageText({ chat_id: chatId, message_id: messageId, text: '验证码已过期' })
     return sendCaptcha(chatId)
   }
 
-  const choice = parseInt(data.slice('captcha:'.length), 10)
-  if(choice === state.answer){
+  const [, nonce, digit] = data.split(':')
+  // 点的是旧验证码消息上的按钮
+  if(nonce !== state.nonce){
+    await answerCallbackQuery({ callback_query_id: query.id, text: '该验证码已失效，请使用最新的验证码' })
+    return editMessageText({ chat_id: chatId, message_id: messageId, text: '验证码已失效' })
+  }
+
+  const choice = parseInt(digit, 10)
+  if(choice === state.seq[state.pos]){
+    state.pos += 1
+    if(state.pos < state.seq.length){
+      await nfd.put('captcha-' + chatId, JSON.stringify(state), { expirationTtl: CAPTCHA_TTL })
+      await answerCallbackQuery({ callback_query_id: query.id })
+      return editMessageText({
+        chat_id: chatId,
+        message_id: messageId,
+        text: captchaText(state),
+        reply_markup: captchaKeyboard(state),
+      })
+    }
+
     await nfd.put('verified-' + chatId, true)
     await nfd.delete('captcha-' + chatId)
     await answerCallbackQuery({ callback_query_id: query.id, text: '验证通过' })
@@ -188,14 +217,14 @@ async function onCallbackQuery(query){
     return editMessageText({
       chat_id: chatId,
       message_id: messageId,
-      text: `❌ 答错次数过多，请 ${CAPTCHA_LOCK_TTL / 60} 分钟后再试。`,
+      text: `❌ 答错次数过多，请 ${CAPTCHA_LOCK_TTL / 3600} 小时后再试。`,
     })
   }
   state.fails = fails
   await nfd.put('captcha-' + chatId, JSON.stringify(state), { expirationTtl: CAPTCHA_TTL })
-  await answerCallbackQuery({ callback_query_id: query.id, text: '答案错误，请重试' })
-  await editMessageText({ chat_id: chatId, message_id: messageId, text: '❌ 答案错误' })
-  return sendCaptcha(chatId, `答案错误（剩余 ${CAPTCHA_MAX_FAILS - fails} 次机会）。\n`)
+  await answerCallbackQuery({ callback_query_id: query.id, text: '顺序错误，请重试' })
+  await editMessageText({ chat_id: chatId, message_id: messageId, text: '❌ 顺序错误' })
+  return sendCaptcha(chatId, `顺序错误（剩余 ${CAPTCHA_MAX_FAILS - fails} 次机会）。\n`)
 }
 
 /**
