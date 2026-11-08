@@ -21,11 +21,14 @@ No Fraud / Node Forward Bot
     - 增加一个`ENV_BOT_TOKEN`变量，数值为从步骤1中获得的token
     - 增加一个`ENV_BOT_SECRET`变量，数值为从步骤2中获得的secret
     - 增加一个`ENV_ADMIN_UID`变量，数值为从步骤3中获得的用户id
+    - （可选）托管多个bot：增加一个`ENV_BOTS`变量，填入多个bot的token，用逗号或换行分隔；可与`ENV_BOT_TOKEN`同时使用，也可只用`ENV_BOTS`
 6. 绑定kv数据库，创建一个Namespace Name为`nfd`的kv数据库，在setting -> variable中设置`KV Namespace Bindings`：nfd -> nfd
 7. 点击`Quick Edit`，复制[这个文件](./worker.js)到编辑器中
-8. 通过打开`https://xxx.workers.dev/registerWebhook`来注册websoket
+8. 通过打开`https://xxx.workers.dev/registerWebhook`来注册webhook，会一次性为所有bot注册（每个bot的地址为`/endpoint/<bot id>`）；新增或删除bot后需要重新打开一次
 
 ## 使用方法
+- 支持一个worker托管多个bot，所有bot的消息都转发给同一个`ENV_ADMIN_UID`，你需要先给每个bot都发送一次`/start`
+- 在哪个bot里收到的转发消息，就在哪个bot里回复；验证码只需通过一次，屏蔽对所有bot生效
 - 当其他用户给bot发消息，会被转发到bot创建者
 - 用户回复普通文字给转发的消息时，会回复到原消息发送者
 - 用户回复`/block`, `/unblock`, `/checkblock`等命令会执行相关指令，**不会**回复到原消息发送者

@@ -5,6 +5,7 @@ workers_dev = true
 preview_urls = false
 
 # ENV_BOT_TOKEN / ENV_BOT_SECRET / ENV_ADMIN_UID 用 `wrangler secret put` 设置
+# 托管多个 bot：再设置 ENV_BOTS（多个 token 用逗号或换行分隔）
 kv_namespaces = [
   { binding = "nfd", id = "fbfb452b7ff944a3a000d554216092b8" }
 ]
